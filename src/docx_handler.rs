@@ -919,6 +919,7 @@ impl DocxHandler {
     }
 
     /// Update document core properties stored in our metadata (best-effort)
+    /// Update document core properties: in-memory metadata AND docProps/core.xml
     pub fn set_document_properties(
         &mut self,
         doc_id: &str,
@@ -926,11 +927,111 @@ impl DocxHandler {
         subject: Option<String>,
         author: Option<String>,
     ) -> Result<()> {
-        let meta = self.documents.get_mut(doc_id)
-            .ok_or_else(|| anyhow::anyhow!("Document not found: {}", doc_id))?;
-        if let Some(t) = title { meta.title = Some(t); }
-        if let Some(s) = subject { meta.subject = Some(s); }
-        if let Some(a) = author { meta.author = Some(a); }
+        // 1) Update in-memory metadata
+        {
+            let meta = self.documents.get_mut(doc_id)
+                .ok_or_else(|| anyhow::anyhow!("Document not found: {}", doc_id))?;
+            if let Some(t) = title.clone()   { meta.title   = Some(t); }
+            if let Some(s) = subject.clone() { meta.subject = Some(s); }
+            if let Some(a) = author.clone()  { meta.author  = Some(a); }
+        }
+
+        // 2) Persist into docProps/core.xml so values survive save/reopen
+        //    and are visible to Word, LibreOffice, etc.
+        let path = self.documents.get(doc_id)
+            .ok_or_else(|| anyhow::anyhow!("Document not found: {}", doc_id))?
+            .path
+            .clone();
+        if !path.exists() {
+            return Ok(()); // nothing on disk yet; in-memory update is enough
+        }
+
+        let src_file = std::fs::File::open(&path)?;
+        let mut archive = ZipArchive::new(src_file)?;
+
+        let mut core_xml = String::new();
+        if let Ok(mut f) = archive.by_name("docProps/core.xml") {
+            use std::io::Read as _;
+            f.read_to_string(&mut core_xml)?;
+        } else {
+            core_xml = String::from(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<cp:coreProperties \
+xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" \
+xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+xmlns:dcterms=\"http://purl.org/dc/terms/\" \
+xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\
+</cp:coreProperties>",
+            );
+        }
+
+        fn upsert_tag(xml: &mut String, tag: &str, value: &str) -> Result<()> {
+            let escaped = value
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            let open = format!("<{}>", tag);
+            let close = format!("</{}>", tag);
+            let self_close_a = format!("<{}/>", tag);
+            let self_close_b = format!("<{} />", tag);
+
+            if let Some(s) = xml.find(&open) {
+                let inner_start = s + open.len();
+                if let Some(e_rel) = xml[inner_start..].find(&close) {
+                    let inner_end = inner_start + e_rel;
+                    xml.replace_range(inner_start..inner_end, &escaped);
+                    return Ok(());
+                }
+            }
+            for sc in [&self_close_a, &self_close_b] {
+                if let Some(pos) = xml.find(sc) {
+                    let new_node = format!("{}{}{}", open, escaped, close);
+                    xml.replace_range(pos..pos + sc.len(), &new_node);
+                    return Ok(());
+                }
+            }
+            let close_root = "</cp:coreProperties>";
+            if let Some(pos) = xml.rfind(close_root) {
+                let new_node = format!("{}{}{}", open, escaped, close);
+                xml.insert_str(pos, &new_node);
+                return Ok(());
+            }
+            anyhow::bail!("malformed core.xml (no </cp:coreProperties>)");
+        }
+
+        if let Some(t) = title.as_deref()   { upsert_tag(&mut core_xml, "dc:title",   t)?; }
+        if let Some(s) = subject.as_deref() { upsert_tag(&mut core_xml, "dc:subject", s)?; }
+        if let Some(a) = author.as_deref()  { upsert_tag(&mut core_xml, "dc:creator", a)?; }
+
+        // Re-pack the archive
+        let temp_path = path.with_extension("docx.tmp");
+        let dst_file = std::fs::File::create(&temp_path)?;
+        let mut writer = ZipWriter::new(dst_file);
+        let options = FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+        let mut wrote_core = false;
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)?;
+            let name = file.name().to_string();
+            use std::io::{Read as _, Write as _};
+            writer.start_file(name.clone(), options)?;
+            if name == "docProps/core.xml" {
+                writer.write_all(core_xml.as_bytes())?;
+                wrote_core = true;
+            } else {
+                let mut buf = Vec::new();
+                file.read_to_end(&mut buf)?;
+                writer.write_all(&buf)?;
+            }
+        }
+        if !wrote_core {
+            use std::io::Write as _;
+            writer.start_file("docProps/core.xml".to_string(), options)?;
+            writer.write_all(core_xml.as_bytes())?;
+        }
+        writer.finish()?;
+        std::fs::rename(&temp_path, &path)?;
+        info!("Updated document properties for {}", doc_id);
         Ok(())
     }
 

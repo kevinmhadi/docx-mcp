@@ -1537,6 +1537,69 @@ impl DocxToolsProvider {
                     Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
                 }
             },
+
+            "get_document_properties" => {
+                let doc_id = arguments["document_id"].as_str().unwrap_or("");
+                let handler = self.handler.read().unwrap();
+                match handler.get_document_properties_json(doc_id) {
+                    Ok(json) => ToolOutcome::Metadata { metadata: json },
+                    Err(e)   => ToolOutcome::Error { code: ErrorCode::DocNotFound, error: e.to_string(), hint: None },
+                }
+            },
+
+            "set_document_properties" => {
+                let doc_id  = arguments["document_id"].as_str().unwrap_or("");
+                let title   = arguments.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let subject = arguments.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let author  = arguments.get("author").and_then(|v| v.as_str()).map(|s| s.to_string());
+                if title.is_none() && subject.is_none() && author.is_none() {
+                    ToolOutcome::Error {
+                        code: ErrorCode::ValidationError,
+                        error: "Provide at least one of title/subject/author".into(),
+                        hint: Some("Pass any combination of {title, subject, author}".into()),
+                    }
+                } else {
+                    let mut handler = self.handler.write().unwrap();
+                    match handler.set_document_properties(doc_id, title, subject, author) {
+                        Ok(_)  => ToolOutcome::Ok { message: Some("Document properties updated".into()) },
+                        Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                    }
+                }
+            },
+
+            "insert_after_heading" => {
+                let doc_id       = arguments["document_id"].as_str().unwrap_or("");
+                let heading_text = arguments["heading_text"].as_str().unwrap_or("");
+                let text         = arguments["text"].as_str().unwrap_or("");
+                let mut handler  = self.handler.write().unwrap();
+                match handler.insert_after_heading(doc_id, heading_text, text) {
+                    Ok(true)  => ToolOutcome::Ok { message: Some("Paragraph inserted after heading".into()) },
+                    Ok(false) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: "Heading not found".into(), hint: None },
+                    Err(e)    => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                }
+            },
+
+            "sanitize_external_links" => {
+                let doc_id      = arguments["document_id"].as_str().unwrap_or("");
+                let mut handler = self.handler.write().unwrap();
+                match handler.sanitize_external_links(doc_id) {
+                    Ok(n)  => ToolOutcome::Ok { message: Some(format!("Removed {} external link(s)", n)) },
+                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                }
+            },
+
+            "redact_text" => {
+                let doc_id         = arguments["document_id"].as_str().unwrap_or("");
+                let pattern        = arguments["pattern"].as_str().unwrap_or("");
+                let use_regex      = arguments.get("use_regex").and_then(|v| v.as_bool()).unwrap_or(false);
+                let whole_word     = arguments.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false);
+                let case_sensitive = arguments.get("case_sensitive").and_then(|v| v.as_bool()).unwrap_or(false);
+                let mut handler    = self.handler.write().unwrap();
+                match handler.redact_text(doc_id, pattern, use_regex, whole_word, case_sensitive) {
+                    Ok(n)  => ToolOutcome::Ok { message: Some(format!("Redacted {} occurrence(s)", n)) },
+                    Err(e) => ToolOutcome::Error { code: ErrorCode::ValidationError, error: e.to_string(), hint: None },
+                }
+            },
             
             "analyze_formatting" => {
                 let doc_id = arguments["document_id"].as_str().unwrap_or("");
