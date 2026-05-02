@@ -17,6 +17,12 @@ mod pure_converter;
 mod advanced_docx;
 mod security;
 
+#[cfg(feature = "runtime-server")]
+mod response {
+    pub use docx_mcp::response::{ToolOutcome, ErrorCode};
+}
+
+
 #[cfg(feature = "embedded-fonts")]
 mod fonts;
 
@@ -81,8 +87,10 @@ async fn main() -> Result<()> {
             }
             fn list_tools(&self) -> Vec<SpecTool> {
                 // DocxToolsProvider::list_tools is async; block briefly with tokio runtime handle
-                let rt = tokio::runtime::Handle::current();
-                let tools = rt.block_on(self.0.list_tools());
+                let provider = self.0.clone();
+                let tools = std::thread::spawn(move || {
+                    tokio::runtime::Runtime::new().unwrap().block_on(provider.list_tools())
+                }).join().unwrap();
                 tools.into_iter().map(|t| SpecTool{ name: t.name, description: t.description.unwrap_or_default(), input_schema: t.input_schema }).collect()
             }
             fn call_tool(&self, tool_name: &str, arguments: JsonValue) -> Pin<Box<dyn Future<Output = Result<Vec<Content>, mcp_spec::handler::ToolError>> + Send + 'static>> {
